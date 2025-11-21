@@ -1,0 +1,5 @@
+{
+  "name": "Marathon Fuel Master",
+  "description": "A smart marathon nutrition planner that helps runners calculate carbohydrate intake per hour using common race fuels and AI-powered custom food lookups.",
+  "requestFramePermissions": []
+}
