@@ -1,20 +1,26 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Marathon Fuel Master
 
-# Run and deploy your AI Studio app
+A smart marathon nutrition planner that helps runners calculate carbohydrate, sodium, and potassium intake per hour using common race fuels and AI-powered custom food lookups.
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/drive/1yrzYfO4ul_H2YpruxyeN1ZtN7UiE6FHJ
+- **Smart Fueling Calculator**: Plan your nutrition hour-by-hour to hit specific carbohydrate targets.
+- **Electrolyte Tracking**: Monitor Sodium and Potassium intake alongside carbs to prevent cramping and dehydration.
+- **Extensive Database**: Built-in presets for popular brands like Maurten, GU, Tailwind, Clif, and generic foods like bananas, dates, or pretzels.
+- **AI-Powered Search**: Use Google Gemini to find nutritional info for any custom food or snack not in the database.
+- **Visual Insights**: Real-time charts and progress bars to visualize your fueling strategy against your goals.
+- **AI Analysis**: Get personalized coaching tips and analysis on your race plan.
 
-## Run Locally
+## Technologies
 
-**Prerequisites:**  Node.js
+- **Frontend**: React, Tailwind CSS
+- **Visualization**: Recharts
+- **Icons**: Lucide React
+- **AI Integration**: Google Gemini API (`@google/genai`)
 
+## Usage
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+1. **Set Goals**: Configure your target marathon time and desired hourly intake for Carbs, Sodium, and Potassium.
+2. **Build Plan**: Add hours to your race duration.
+3. **Add Fuel**: Click on an hour to open the fuel picker. Select from presets or search for custom items (e.g., "Uncrustables").
+4. **Analyze**: Switch to the Analyze tab to see a chart of your fuel intake and get AI feedback.
