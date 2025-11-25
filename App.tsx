@@ -1,72 +1,111 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
-import { UserSettings, HourPlan, FuelItem } from './types';
-import { PRESET_FUELS, MAX_HOURS, DEFAULT_TARGET_CARBS, DEFAULT_TARGET_SODIUM, DEFAULT_TARGET_POTASSIUM } from './constants';
+import { UserSettings, HourPlan, FuelItem, FuelType } from './types';
+import { PRESET_FUELS, MAX_HOURS } from './constants';
 import { FuelCard } from './components/FuelCard';
 import { HourlyBucket } from './components/HourlyBucket';
 import { searchCustomFood, analyzePlan } from './services/geminiService';
-import { Search, Sparkles, BarChart3, Timer, Loader2, Menu, X, Activity, Plus } from 'lucide-react';
+import { loadPlan, loadSettings, savePlan, saveSettings, clearAllData, DEFAULT_SETTINGS } from './services/storageService';
+import { Search, Sparkles, BarChart3, Timer, Loader2, Menu, X, Activity, Plus, Settings, Trash2, RotateCcw, Check, EyeOff } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
 
 const App: React.FC = () => {
-  // --- State ---
-  const [settings, setSettings] = useState<UserSettings>({
-    targetTimeHours: 3,
-    targetTimeMinutes: 30,
-    targetCarbsPerHour: DEFAULT_TARGET_CARBS,
-    targetSodiumPerHour: DEFAULT_TARGET_SODIUM,
-    targetPotassiumPerHour: DEFAULT_TARGET_POTASSIUM
-  });
+  // --- State Initialization with Storage ---
+  const [settings, setSettings] = useState<UserSettings>(() => loadSettings());
+  const [plan, setPlan] = useState<HourPlan[]>(() => loadPlan() || []);
   
-  const [plan, setPlan] = useState<HourPlan[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [customSearchResults, setCustomSearchResults] = useState<FuelItem[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   
   // UI State
-  const [selectedHourIndex, setSelectedHourIndex] = useState<number | null>(null); // If null, we are in "View All" mode, or selecting via drag (simplified to click)
-  const [activeTab, setActiveTab] = useState<'build' | 'analyze'>('build');
+  const [selectedHourIndex, setSelectedHourIndex] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState<'build' | 'analyze' | 'settings'>('build');
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // --- Init Plan based on Time ---
+  // --- Persistence Effects ---
+  useEffect(() => {
+    saveSettings(settings);
+  }, [settings]);
+
+  useEffect(() => {
+    savePlan(plan);
+  }, [plan]);
+
+  // --- Init Plan Logic ---
+  // Ensure plan size matches target time if plan is empty or resized
   useEffect(() => {
     const totalHours = Math.ceil(settings.targetTimeHours + settings.targetTimeMinutes / 60);
-    // Preserve existing items if resizing, or just create new empty buckets
     setPlan(prev => {
-      const newPlan: HourPlan[] = [];
-      for (let i = 0; i < totalHours; i++) {
-        if (prev[i]) {
-          newPlan.push(prev[i]);
-        } else {
-          newPlan.push({ hourIndex: i, items: [] });
+        // If loaded from storage and matches length, keep it.
+        // If user changed time, resize it.
+        if (prev.length === totalHours) return prev;
+        
+        const newPlan: HourPlan[] = [];
+        for (let i = 0; i < totalHours; i++) {
+            if (prev[i]) {
+                newPlan.push(prev[i]);
+            } else {
+                newPlan.push({ hourIndex: i, items: [] });
+            }
         }
-      }
-      return newPlan;
+        return newPlan;
     });
   }, [settings.targetTimeHours, settings.targetTimeMinutes]);
 
   // --- Derived State ---
+  const allFuels = useMemo(() => {
+      // Combine built-in presets with user's custom fuels
+      return [...PRESET_FUELS, ...settings.customFuels];
+  }, [settings.customFuels]);
+
   const filteredPresets = useMemo(() => {
-    if (!searchQuery.trim()) return PRESET_FUELS;
+    // 1. Filter out disabled items
+    const enabledFuels = allFuels.filter(item => !settings.disabledFuelIds.includes(item.id));
+    
+    // 2. Filter by search query
+    if (!searchQuery.trim()) return enabledFuels;
     const lower = searchQuery.toLowerCase();
-    return PRESET_FUELS.filter(p => 
+    return enabledFuels.filter(p => 
       p.name.toLowerCase().includes(lower) || 
       (p.brand && p.brand.toLowerCase().includes(lower))
     );
-  }, [searchQuery]);
+  }, [searchQuery, settings.disabledFuelIds, allFuels]);
 
   // --- Handlers ---
 
   const addItemToHour = (item: FuelItem, hourIndex: number) => {
     setPlan(prev => prev.map(h => {
       if (h.hourIndex === hourIndex) {
-        // Deep copy item to avoid reference issues
         return { ...h, items: [...h.items, { ...item }] }; 
       }
       return h;
     }));
+  };
+
+  const handleAddAiItem = (item: FuelItem) => {
+      if (selectedHourIndex === null) return;
+      
+      // 1. Add to the current hour's plan
+      addItemToHour(item, selectedHourIndex);
+      
+      // 2. Persist to custom fuels library if not already there (simple duplicate check by name)
+      setSettings(prev => {
+          const exists = prev.customFuels.some(f => f.name.toLowerCase() === item.name.toLowerCase());
+          if (exists) return prev;
+          
+          return {
+              ...prev,
+              customFuels: [item, ...prev.customFuels] // Add to top
+          };
+      });
+
+      // 3. Clear search
+      setSearchQuery('');
+      setCustomSearchResults([]);
   };
 
   const removeItemFromHour = (hourIndex: number, itemId: string) => {
@@ -82,10 +121,49 @@ const App: React.FC = () => {
     }));
   };
 
+  const toggleFuelVisibility = (fuelId: string) => {
+      setSettings(prev => {
+          const isDisabled = prev.disabledFuelIds.includes(fuelId);
+          return {
+              ...prev,
+              disabledFuelIds: isDisabled 
+                ? prev.disabledFuelIds.filter(id => id !== fuelId)
+                : [...prev.disabledFuelIds, fuelId]
+          };
+      });
+  };
+
+  const deleteCustomFuel = (fuelId: string) => {
+      if(confirm('Delete this custom item permanently?')) {
+          setSettings(prev => ({
+              ...prev,
+              customFuels: prev.customFuels.filter(f => f.id !== fuelId),
+              disabledFuelIds: prev.disabledFuelIds.filter(id => id !== fuelId)
+          }));
+      }
+  };
+
+  const handleClearPlan = () => {
+      if (confirm("Are you sure you want to clear all items from your plan?")) {
+          const totalHours = Math.ceil(settings.targetTimeHours + settings.targetTimeMinutes / 60);
+          const emptyPlan = Array.from({ length: totalHours }, (_, i) => ({ hourIndex: i, items: [] }));
+          setPlan(emptyPlan);
+      }
+  };
+
+  const handleFactoryReset = () => {
+      if (confirm("This will delete all settings, custom foods, and data. Are you sure?")) {
+          clearAllData();
+          setSettings(DEFAULT_SETTINGS);
+          // Plan effect will regenerate empty buckets based on default time
+          setPlan([]); 
+          setActiveTab('build');
+      }
+  };
+
   const handleSearchInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSearchQuery(e.target.value);
     if (searchError) setSearchError(null);
-    // Clear AI results if the user changes the query to avoid confusion
     if (customSearchResults.length > 0) {
         setCustomSearchResults([]);
     }
@@ -117,7 +195,6 @@ const App: React.FC = () => {
     setIsAnalyzing(false);
   };
 
-  // Helper to get item count in the currently selected hour
   const getHourItemCount = (itemId: string) => {
     if (selectedHourIndex === null) return 0;
     const hour = plan.find(h => h.hourIndex === selectedHourIndex);
@@ -125,30 +202,30 @@ const App: React.FC = () => {
     return hour.items.filter(i => i.id === itemId).length;
   };
 
-  // --- Chart Data Preparation ---
   const chartData = plan.map(h => ({
     hour: `Hr ${h.hourIndex + 1}`,
     carbs: h.items.reduce((acc, i) => acc + i.carbs, 0),
     target: settings.targetCarbsPerHour
   }));
 
-  // --- Sub-Components for App Layout ---
+  // --- Render Helpers ---
 
   const renderHeader = () => (
     <header className="sticky top-0 z-50 bg-slate-900/80 backdrop-blur-md border-b border-slate-800">
       <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveTab('build')}>
           <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/20">
             <Activity className="w-5 h-5 text-white" />
           </div>
-          <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">
+          <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400 hidden sm:block">
             FuelMaster
           </h1>
         </div>
 
         {/* Desktop Nav */}
-        <nav className="hidden md:flex items-center gap-6">
-            <div className="flex items-center gap-4 px-4 py-1.5 bg-slate-800 rounded-full border border-slate-700">
+        <nav className="hidden md:flex items-center gap-4">
+             {/* Stats Pill */}
+            <div className="flex items-center gap-4 px-4 py-1.5 bg-slate-800 rounded-full border border-slate-700 mr-4">
                 <div className="flex items-center gap-2 text-sm text-slate-300">
                     <Timer className="w-4 h-4 text-slate-500" />
                     <span className="font-mono">{settings.targetTimeHours}h {settings.targetTimeMinutes}m</span>
@@ -159,14 +236,28 @@ const App: React.FC = () => {
                     <span className="font-mono font-bold text-emerald-400">{settings.targetCarbsPerHour}g/hr</span>
                 </div>
             </div>
-             <button 
-                onClick={() => {
-                    setActiveTab(activeTab === 'build' ? 'analyze' : 'build');
-                    if(activeTab === 'build') handleAnalyze();
-                }}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'analyze' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+
+            <button 
+                onClick={() => setActiveTab('build')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'build' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}
             >
-                {activeTab === 'build' ? 'Analyze Plan' : 'Back to Builder'}
+                Builder
+            </button>
+            <button 
+                onClick={() => {
+                    setActiveTab('analyze');
+                    handleAnalyze();
+                }}
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'analyze' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}
+            >
+                Analyze
+            </button>
+             <button 
+                onClick={() => setActiveTab('settings')}
+                className={`p-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'settings' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}
+                aria-label="Settings"
+            >
+                <Settings className="w-5 h-5" />
             </button>
         </nav>
         
@@ -176,32 +267,73 @@ const App: React.FC = () => {
         </button>
       </div>
 
-        {/* Mobile Settings Drawer */}
+        {/* Mobile Drawer */}
         {mobileMenuOpen && (
             <div className="md:hidden border-t border-slate-800 bg-slate-900 p-4 space-y-4 animate-in slide-in-from-top-5">
-                <div className="space-y-2">
+                <button 
+                    onClick={() => { setActiveTab('build'); setMobileMenuOpen(false); }}
+                    className="w-full text-left px-4 py-3 rounded-lg bg-slate-800 text-white font-medium"
+                >
+                    Plan Builder
+                </button>
+                <button 
+                    onClick={() => { setActiveTab('analyze'); handleAnalyze(); setMobileMenuOpen(false); }}
+                    className="w-full text-left px-4 py-3 rounded-lg bg-slate-800 text-white font-medium"
+                >
+                    Analyze
+                </button>
+                <button 
+                    onClick={() => { setActiveTab('settings'); setMobileMenuOpen(false); }}
+                    className="w-full text-left px-4 py-3 rounded-lg bg-slate-800 text-white font-medium flex items-center justify-between"
+                >
+                    Settings <Settings className="w-4 h-4" />
+                </button>
+            </div>
+        )}
+    </header>
+  );
+
+  const renderSettingsView = () => (
+      <div className="p-4 md:p-8 max-w-4xl mx-auto space-y-8 animate-fadeIn">
+          <div className="flex flex-col gap-2 mb-4">
+              <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                  <Settings className="w-6 h-6 text-slate-400" /> Settings
+              </h2>
+              <p className="text-slate-400">Configure your race goals and manage your fuel database.</p>
+          </div>
+
+          {/* Targets Section */}
+          <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 space-y-6">
+              <h3 className="text-lg font-semibold text-white border-b border-slate-700 pb-3">Race Goals</h3>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-3">
                     <label className="text-xs text-slate-500 uppercase font-semibold">Goal Time</label>
                     <div className="flex gap-2">
-                         <input 
-                            type="number" 
-                            value={settings.targetTimeHours}
-                            onChange={(e) => setSettings({...settings, targetTimeHours: Number(e.target.value)})}
-                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white"
-                        />
-                        <span className="text-slate-500 py-2">h</span>
-                         <input 
-                            type="number" 
-                            value={settings.targetTimeMinutes}
-                            onChange={(e) => setSettings({...settings, targetTimeMinutes: Number(e.target.value)})}
-                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-white"
-                        />
-                         <span className="text-slate-500 py-2">m</span>
+                        <div className="relative w-full">
+                            <input 
+                                type="number" 
+                                value={settings.targetTimeHours}
+                                onChange={(e) => setSettings({...settings, targetTimeHours: Math.max(1, Number(e.target.value))})}
+                                className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                            />
+                            <span className="absolute right-3 top-3 text-slate-500 text-sm">hr</span>
+                        </div>
+                        <div className="relative w-full">
+                            <input 
+                                type="number" 
+                                value={settings.targetTimeMinutes}
+                                onChange={(e) => setSettings({...settings, targetTimeMinutes: Math.min(59, Math.max(0, Number(e.target.value)))})}
+                                className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                            />
+                            <span className="absolute right-3 top-3 text-slate-500 text-sm">min</span>
+                        </div>
                     </div>
                 </div>
-                
-                <div className="space-y-2">
+
+                <div className="space-y-3">
                     <div className="flex justify-between items-center">
-                        <label className="text-xs text-slate-500 uppercase font-semibold">Target Carbs</label>
+                        <label className="text-xs text-slate-500 uppercase font-semibold">Carbs Target</label>
                         <span className="text-emerald-400 font-mono text-sm">{settings.targetCarbsPerHour}g/hr</span>
                     </div>
                     <input 
@@ -209,13 +341,13 @@ const App: React.FC = () => {
                         min="30" max="120" step="5"
                         value={settings.targetCarbsPerHour}
                         onChange={(e) => setSettings({...settings, targetCarbsPerHour: Number(e.target.value)})}
-                        className="w-full accent-emerald-500"
+                        className="w-full accent-emerald-500 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer"
                     />
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-3">
                     <div className="flex justify-between items-center">
-                        <label className="text-xs text-slate-500 uppercase font-semibold">Target Sodium</label>
+                        <label className="text-xs text-slate-500 uppercase font-semibold">Sodium Target</label>
                         <span className="text-cyan-400 font-mono text-sm">{settings.targetSodiumPerHour}mg/hr</span>
                     </div>
                     <input 
@@ -223,13 +355,13 @@ const App: React.FC = () => {
                         min="0" max="1000" step="50"
                         value={settings.targetSodiumPerHour}
                         onChange={(e) => setSettings({...settings, targetSodiumPerHour: Number(e.target.value)})}
-                        className="w-full accent-cyan-500"
+                        className="w-full accent-cyan-500 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer"
                     />
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-3">
                     <div className="flex justify-between items-center">
-                        <label className="text-xs text-slate-500 uppercase font-semibold">Target Potassium</label>
+                        <label className="text-xs text-slate-500 uppercase font-semibold">Potassium Target</label>
                         <span className="text-purple-400 font-mono text-sm">{settings.targetPotassiumPerHour}mg/hr</span>
                     </div>
                     <input 
@@ -237,16 +369,104 @@ const App: React.FC = () => {
                         min="0" max="500" step="10"
                         value={settings.targetPotassiumPerHour}
                         onChange={(e) => setSettings({...settings, targetPotassiumPerHour: Number(e.target.value)})}
-                        className="w-full accent-purple-500"
+                        className="w-full accent-purple-500 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer"
                     />
                 </div>
-            </div>
-        )}
-    </header>
+              </div>
+          </div>
+
+          {/* Manage Fuels Section */}
+          <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 space-y-6">
+               <h3 className="text-lg font-semibold text-white border-b border-slate-700 pb-3">Manage Presets</h3>
+               <p className="text-sm text-slate-400">Toggle items to hide them from the fuel picker.</p>
+               
+               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                   {PRESET_FUELS.map(fuel => {
+                       const isDisabled = settings.disabledFuelIds.includes(fuel.id);
+                       return (
+                           <div 
+                                key={fuel.id} 
+                                onClick={() => toggleFuelVisibility(fuel.id)}
+                                className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer transition-all ${isDisabled ? 'bg-slate-900/50 border-slate-800 opacity-60' : 'bg-slate-800 border-slate-600 hover:border-slate-500'}`}
+                           >
+                               <span className={`text-sm font-medium ${isDisabled ? 'text-slate-500' : 'text-slate-200'}`}>
+                                   {fuel.name}
+                               </span>
+                               {isDisabled ? (
+                                   <EyeOff className="w-4 h-4 text-slate-600" />
+                               ) : (
+                                   <Check className="w-4 h-4 text-emerald-500" />
+                               )}
+                           </div>
+                       );
+                   })}
+               </div>
+          </div>
+          
+           {/* Custom Fuels Section */}
+           {settings.customFuels.length > 0 && (
+                <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 space-y-6">
+                    <h3 className="text-lg font-semibold text-white border-b border-slate-700 pb-3">My Custom Items</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {settings.customFuels.map(fuel => {
+                            const isDisabled = settings.disabledFuelIds.includes(fuel.id);
+                            return (
+                                <div 
+                                        key={fuel.id} 
+                                        className={`flex items-center justify-between p-3 rounded-lg border transition-all ${isDisabled ? 'bg-slate-900/50 border-slate-800 opacity-60' : 'bg-slate-800 border-slate-600'}`}
+                                >
+                                    <div 
+                                        className="flex-1 cursor-pointer flex items-center justify-between mr-2"
+                                        onClick={() => toggleFuelVisibility(fuel.id)}
+                                    >
+                                        <span className={`text-sm font-medium truncate ${isDisabled ? 'text-slate-500' : 'text-slate-200'}`}>
+                                            {fuel.name}
+                                        </span>
+                                        {isDisabled ? (
+                                            <EyeOff className="w-4 h-4 text-slate-600 shrink-0" />
+                                        ) : (
+                                            <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                                        )}
+                                    </div>
+                                    <button 
+                                        onClick={(e) => { e.stopPropagation(); deleteCustomFuel(fuel.id); }}
+                                        className="p-1.5 rounded-md hover:bg-red-900/50 text-slate-500 hover:text-red-400"
+                                        title="Delete Permanently"
+                                    >
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+           )}
+
+          {/* Data Management Section */}
+          <div className="bg-red-900/10 rounded-xl p-6 border border-red-900/30 space-y-6">
+              <h3 className="text-lg font-semibold text-red-200 border-b border-red-900/30 pb-3">Danger Zone</h3>
+              
+              <div className="flex flex-col sm:flex-row gap-4">
+                  <button 
+                    onClick={handleClearPlan}
+                    className="flex items-center justify-center gap-2 px-4 py-3 bg-red-950 hover:bg-red-900 text-red-400 border border-red-900/50 rounded-lg transition-colors text-sm font-medium"
+                  >
+                      <Trash2 className="w-4 h-4" /> Clear Current Plan
+                  </button>
+                  
+                  <button 
+                    onClick={handleFactoryReset}
+                    className="flex items-center justify-center gap-2 px-4 py-3 bg-transparent hover:bg-red-950/50 text-red-400 border border-red-900/50 rounded-lg transition-colors text-sm font-medium"
+                  >
+                      <RotateCcw className="w-4 h-4" /> Reset All Data
+                  </button>
+              </div>
+          </div>
+      </div>
   );
 
   const renderAnalysisView = () => (
-      <div className="p-6 max-w-4xl mx-auto space-y-8 animate-fadeIn">
+      <div className="p-4 md:p-8 max-w-4xl mx-auto space-y-8 animate-fadeIn">
           <div className="bg-slate-800/50 rounded-2xl p-6 border border-slate-700">
               <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
                   <BarChart3 className="w-6 h-6 text-blue-500" /> Fueling Analysis
@@ -301,14 +521,11 @@ const App: React.FC = () => {
       {renderHeader()}
       
       <main className="flex-1 flex overflow-hidden">
-        {/* Main Content Area */}
-        <div className="flex-1 overflow-y-auto bg-slate-900/30 relative">
-            
-            {activeTab === 'analyze' ? (
-                renderAnalysisView()
-            ) : (
+        <div className="flex-1 overflow-y-auto bg-slate-900/30 relative custom-scrollbar">
+            {activeTab === 'analyze' && renderAnalysisView()}
+            {activeTab === 'settings' && renderSettingsView()}
+            {activeTab === 'build' && (
                 <div className="p-4 md:p-8 max-w-5xl mx-auto">
-                    {/* Hours Grid */}
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
                         {plan.map((hour) => (
                             <HourlyBucket 
@@ -325,7 +542,6 @@ const App: React.FC = () => {
                             />
                         ))}
                         
-                         {/* Add Hour Button (Dynamic extension) */}
                         <button 
                             onClick={() => setSettings(s => ({...s, targetTimeHours: s.targetTimeHours + 1}))}
                             className="min-h-[200px] rounded-xl border border-dashed border-slate-800 hover:border-slate-600 bg-slate-900/20 flex flex-col items-center justify-center text-slate-500 hover:text-slate-300 transition-all group"
@@ -341,7 +557,7 @@ const App: React.FC = () => {
         </div>
       </main>
 
-      {/* Item Picker Modal (When an hour is clicked) */}
+      {/* Item Picker Modal */}
       {selectedHourIndex !== null && (
         <div className="fixed inset-0 z-[60] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
             <div className="bg-slate-900 w-full max-w-lg rounded-2xl border border-slate-700 shadow-2xl shadow-black overflow-hidden flex flex-col max-h-[80vh]">
@@ -366,7 +582,6 @@ const App: React.FC = () => {
                          {isSearching && <Loader2 className="w-4 h-4 text-blue-500 absolute right-3.5 top-3.5 animate-spin" />}
                     </form>
                      
-                     {/* AI Result in Modal */}
                      {customSearchResults.length > 0 && (
                         <div className="mt-4">
                             <h4 className="text-xs font-bold text-blue-400 uppercase mb-2">AI Search Result</h4>
@@ -375,11 +590,7 @@ const App: React.FC = () => {
                                     key={item.id} 
                                     item={item}
                                     compact={true} 
-                                    onAdd={() => {
-                                        addItemToHour(item, selectedHourIndex);
-                                        setSearchQuery('');
-                                        setCustomSearchResults([]);
-                                    }}
+                                    onAdd={() => handleAddAiItem(item)}
                                     count={getHourItemCount(item.id)}
                                     showSingleCount={true}
                                 />
@@ -392,15 +603,21 @@ const App: React.FC = () => {
                     )}
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-900">
+                <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-900 custom-scrollbar">
                     <h4 className="text-xs font-bold text-slate-500 uppercase">
-                        {searchQuery ? 'Matching Presets' : 'Common Fuels'}
+                        {searchQuery ? 'Matching Items' : 'Available Fuels'}
                     </h4>
                     
                     {filteredPresets.length === 0 ? (
                         <div className="text-center py-8 text-slate-500 text-sm">
-                             <p>No local matches.</p>
-                             <p className="text-xs mt-1 text-slate-600">Hit Enter to search AI</p>
+                             {searchQuery ? (
+                                <>
+                                    <p>No matches found in library.</p>
+                                    <p className="text-xs mt-1 text-slate-600">Hit Enter to search AI</p>
+                                </>
+                             ) : (
+                                <p>All items hidden. Check Settings.</p>
+                             )}
                         </div>
                     ) : (
                         filteredPresets.map(item => (
@@ -410,7 +627,6 @@ const App: React.FC = () => {
                                 compact={true}
                                 onAdd={() => {
                                     addItemToHour(item, selectedHourIndex);
-                                    // Keep modal open to add more items
                                 }}
                                 count={getHourItemCount(item.id)}
                                 showSingleCount={true}

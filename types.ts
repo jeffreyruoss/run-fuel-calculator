@@ -1,3 +1,4 @@
+
 export enum FuelType {
   GEL = 'GEL',
   CHEW = 'CHEW',
@@ -30,6 +31,8 @@ export interface UserSettings {
   targetSodiumPerHour: number;
   targetPotassiumPerHour: number;
   weight?: number; // kg, optional for AI advice
+  disabledFuelIds: string[]; // List of IDs of fuels the user wants to hide
+  customFuels: FuelItem[]; // List of custom items added by the user
 }
 
 export interface AiAdvice {
