@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { UserSettings, HourPlan, FuelItem, FuelType } from './types';
 import { PRESET_FUELS, MAX_HOURS } from './constants';
@@ -6,7 +5,8 @@ import { FuelCard } from './components/FuelCard';
 import { HourlyBucket } from './components/HourlyBucket';
 import { searchCustomFood, analyzePlan } from './services/geminiService';
 import { loadPlan, loadSettings, savePlan, saveSettings, clearAllData, DEFAULT_SETTINGS } from './services/storageService';
-import { Search, Sparkles, BarChart3, Timer, Loader2, Menu, X, Activity, Plus, Settings, Trash2, RotateCcw, Check, EyeOff } from 'lucide-react';
+import { fetchLocalWeather } from './services/weatherService';
+import { Search, Sparkles, BarChart3, Timer, Loader2, Menu, X, Activity, Plus, Settings, Trash2, RotateCcw, Check, EyeOff, Thermometer, Droplets, MapPin, Calculator } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
 
 const App: React.FC = () => {
@@ -25,6 +25,7 @@ const App: React.FC = () => {
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isFetchingWeather, setIsFetchingWeather] = useState(false);
 
   // --- Persistence Effects ---
   useEffect(() => {
@@ -36,12 +37,9 @@ const App: React.FC = () => {
   }, [plan]);
 
   // --- Init Plan Logic ---
-  // Ensure plan size matches target time if plan is empty or resized
   useEffect(() => {
     const totalHours = Math.ceil(settings.targetTimeHours + settings.targetTimeMinutes / 60);
     setPlan(prev => {
-        // If loaded from storage and matches length, keep it.
-        // If user changed time, resize it.
         if (prev.length === totalHours) return prev;
         
         const newPlan: HourPlan[] = [];
@@ -58,15 +56,11 @@ const App: React.FC = () => {
 
   // --- Derived State ---
   const allFuels = useMemo(() => {
-      // Combine built-in presets with user's custom fuels
       return [...PRESET_FUELS, ...settings.customFuels];
   }, [settings.customFuels]);
 
   const filteredPresets = useMemo(() => {
-    // 1. Filter out disabled items
     const enabledFuels = allFuels.filter(item => !settings.disabledFuelIds.includes(item.id));
-    
-    // 2. Filter by search query
     if (!searchQuery.trim()) return enabledFuels;
     const lower = searchQuery.toLowerCase();
     return enabledFuels.filter(p => 
@@ -75,7 +69,80 @@ const App: React.FC = () => {
     );
   }, [searchQuery, settings.disabledFuelIds, allFuels]);
 
-  // --- Handlers ---
+  // --- Logic ---
+
+  const calculateTargets = () => {
+    // Heuristic Logic for Fueling Targets
+    let newCarbs = 60;
+    let newSodium = 300;
+    let newPotassium = 100;
+
+    // 1. Activity Mode Impact on Carbs
+    if (settings.activityMode === 'RACE') {
+        newCarbs = 75; // Baseline high for racing
+    } else {
+        newCarbs = 45; // Lower for Zone 2 training
+    }
+
+    // 2. Sweat Profile Impact on Sodium
+    // Baselines: Low ~300, Avg ~500, High ~800+
+    if (settings.sweatProfile === 'LOW') {
+        newSodium = 250;
+    } else if (settings.sweatProfile === 'AVERAGE') {
+        newSodium = 500;
+    } else {
+        newSodium = 900; // Salty sweater
+    }
+
+    // 3. Weather Impact (Heat & Humidity)
+    const { temperatureF, humidity } = settings.weather;
+
+    // Heat Factor
+    if (temperatureF > 75) {
+        newSodium += 200; // Significant increase in hot weather
+        newPotassium += 50;
+        // Sometimes heat reduces carb tolerance slightly, but we'll keep performance focus
+    } else if (temperatureF > 60) {
+        newSodium += 100;
+    }
+
+    // Humidity Factor (>60% impedes evaporation, increasing sweat rate)
+    if (humidity > 60 && temperatureF > 60) {
+        newSodium += 100;
+    }
+
+    // Caps
+    newCarbs = Math.min(120, Math.max(30, newCarbs));
+    newSodium = Math.min(1500, Math.max(0, newSodium));
+    newPotassium = Math.min(500, Math.max(0, newPotassium));
+
+    setSettings(prev => ({
+        ...prev,
+        targetCarbsPerHour: newCarbs,
+        targetSodiumPerHour: newSodium,
+        targetPotassiumPerHour: newPotassium
+    }));
+
+    alert(`Targets Updated!\n\nBased on your ${settings.sweatProfile.toLowerCase()} sweat profile, ${settings.activityMode === 'RACE' ? 'race' : 'training'} intensity, and ${temperatureF}°F weather.\n\nCarbs: ${newCarbs}g\nSodium: ${newSodium}mg\nPotassium: ${newPotassium}mg`);
+  };
+
+  const handleFetchWeather = async () => {
+      setIsFetchingWeather(true);
+      try {
+          const data = await fetchLocalWeather();
+          setSettings(prev => ({
+              ...prev,
+              weather: {
+                  temperatureF: data.temperatureF,
+                  humidity: data.humidity
+              }
+          }));
+      } catch (error) {
+          alert("Could not fetch weather. Please ensure location permissions are allowed or enter manually.");
+      } finally {
+          setIsFetchingWeather(false);
+      }
+  };
 
   const addItemToHour = (item: FuelItem, hourIndex: number) => {
     setPlan(prev => prev.map(h => {
@@ -88,22 +155,12 @@ const App: React.FC = () => {
 
   const handleAddAiItem = (item: FuelItem) => {
       if (selectedHourIndex === null) return;
-      
-      // 1. Add to the current hour's plan
       addItemToHour(item, selectedHourIndex);
-      
-      // 2. Persist to custom fuels library if not already there (simple duplicate check by name)
       setSettings(prev => {
           const exists = prev.customFuels.some(f => f.name.toLowerCase() === item.name.toLowerCase());
           if (exists) return prev;
-          
-          return {
-              ...prev,
-              customFuels: [item, ...prev.customFuels] // Add to top
-          };
+          return { ...prev, customFuels: [item, ...prev.customFuels] };
       });
-
-      // 3. Clear search
       setSearchQuery('');
       setCustomSearchResults([]);
   };
@@ -155,7 +212,6 @@ const App: React.FC = () => {
       if (confirm("This will delete all settings, custom foods, and data. Are you sure?")) {
           clearAllData();
           setSettings(DEFAULT_SETTINGS);
-          // Plan effect will regenerate empty buckets based on default time
           setPlan([]); 
           setActiveTab('build');
       }
@@ -172,14 +228,11 @@ const App: React.FC = () => {
   const handleAiSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
-    
     setIsSearching(true);
     setSearchError(null);
     setCustomSearchResults([]);
-    
     const result = await searchCustomFood(searchQuery);
     setIsSearching(false);
-    
     if (result) {
       setCustomSearchResults([result]);
     } else {
@@ -222,9 +275,7 @@ const App: React.FC = () => {
           </h1>
         </div>
 
-        {/* Desktop Nav */}
         <nav className="hidden md:flex items-center gap-4">
-             {/* Stats Pill */}
             <div className="flex items-center gap-4 px-4 py-1.5 bg-slate-800 rounded-full border border-slate-700 mr-4">
                 <div className="flex items-center gap-2 text-sm text-slate-300">
                     <Timer className="w-4 h-4 text-slate-500" />
@@ -261,13 +312,11 @@ const App: React.FC = () => {
             </button>
         </nav>
         
-        {/* Mobile Menu Toggle */}
         <button className="md:hidden p-2 text-slate-400" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
             {mobileMenuOpen ? <X /> : <Menu />}
         </button>
       </div>
 
-        {/* Mobile Drawer */}
         {mobileMenuOpen && (
             <div className="md:hidden border-t border-slate-800 bg-slate-900 p-4 space-y-4 animate-in slide-in-from-top-5">
                 <button 
@@ -299,15 +348,103 @@ const App: React.FC = () => {
               <h2 className="text-2xl font-bold text-white flex items-center gap-2">
                   <Settings className="w-6 h-6 text-slate-400" /> Settings
               </h2>
-              <p className="text-slate-400">Configure your race goals and manage your fuel database.</p>
+              <p className="text-slate-400">Configure physiology, conditions, and targets.</p>
+          </div>
+
+          {/* Physiology & Conditions Section */}
+          <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 space-y-6">
+              <div className="flex items-center justify-between border-b border-slate-700 pb-3">
+                <h3 className="text-lg font-semibold text-white">Physiology & Conditions</h3>
+                <button 
+                    onClick={calculateTargets}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors shadow-lg shadow-blue-900/20"
+                >
+                    <Calculator className="w-4 h-4" /> Auto-Set Targets
+                </button>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                 {/* Activity Mode */}
+                 <div className="space-y-3">
+                    <label className="text-xs text-slate-500 uppercase font-semibold">Activity Type</label>
+                    <div className="flex bg-slate-900 p-1 rounded-lg border border-slate-700">
+                        <button 
+                            onClick={() => setSettings({...settings, activityMode: 'TRAINING_Z2'})}
+                            className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${settings.activityMode === 'TRAINING_Z2' ? 'bg-slate-700 text-white shadow' : 'text-slate-400 hover:text-slate-200'}`}
+                        >
+                            Zone 2 Training
+                        </button>
+                        <button 
+                            onClick={() => setSettings({...settings, activityMode: 'RACE'})}
+                            className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${settings.activityMode === 'RACE' ? 'bg-slate-700 text-white shadow' : 'text-slate-400 hover:text-slate-200'}`}
+                        >
+                            Race Day
+                        </button>
+                    </div>
+                </div>
+
+                {/* Sweat Profile */}
+                <div className="space-y-3">
+                    <label className="text-xs text-slate-500 uppercase font-semibold">Sweat Profile</label>
+                    <select 
+                        value={settings.sweatProfile}
+                        onChange={(e) => setSettings({...settings, sweatProfile: e.target.value as any})}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                    >
+                        <option value="LOW">Low / Non-Salty Sweater</option>
+                        <option value="AVERAGE">Average Sweater</option>
+                        <option value="HIGH">Heavy / Salty Sweater</option>
+                    </select>
+                </div>
+
+                {/* Weather Manual / Auto */}
+                <div className="space-y-3 md:col-span-2">
+                    <div className="flex justify-between items-center mb-1">
+                        <label className="text-xs text-slate-500 uppercase font-semibold">Weather Conditions</label>
+                        <button 
+                            onClick={handleFetchWeather}
+                            disabled={isFetchingWeather}
+                            className="text-xs flex items-center gap-1 text-blue-400 hover:text-blue-300 disabled:opacity-50"
+                        >
+                            {isFetchingWeather ? <Loader2 className="w-3 h-3 animate-spin" /> : <MapPin className="w-3 h-3" />}
+                            {isFetchingWeather ? 'Locating...' : 'Get Local Weather'}
+                        </button>
+                    </div>
+                    <div className="flex gap-4">
+                        <div className="relative w-full">
+                            <Thermometer className="absolute left-3 top-3.5 w-4 h-4 text-slate-500" />
+                            <input 
+                                type="number" 
+                                value={settings.weather.temperatureF}
+                                onChange={(e) => setSettings({...settings, weather: { ...settings.weather, temperatureF: Number(e.target.value) }})}
+                                className="w-full bg-slate-900 border border-slate-700 rounded-lg py-3 pl-9 pr-8 text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                            />
+                            <span className="absolute right-3 top-3.5 text-slate-500 text-sm">°F</span>
+                        </div>
+                        <div className="relative w-full">
+                            <Droplets className="absolute left-3 top-3.5 w-4 h-4 text-slate-500" />
+                            <input 
+                                type="number" 
+                                value={settings.weather.humidity}
+                                onChange={(e) => setSettings({...settings, weather: { ...settings.weather, humidity: Number(e.target.value) }})}
+                                className="w-full bg-slate-900 border border-slate-700 rounded-lg py-3 pl-9 pr-8 text-white focus:ring-2 focus:ring-blue-500 outline-none"
+                            />
+                            <span className="absolute right-3 top-3.5 text-slate-500 text-sm">%</span>
+                        </div>
+                    </div>
+                    <p className="text-xs text-slate-500">
+                        Higher heat and humidity increases sodium requirements.
+                    </p>
+                </div>
+              </div>
           </div>
 
           {/* Targets Section */}
           <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 space-y-6">
-              <h3 className="text-lg font-semibold text-white border-b border-slate-700 pb-3">Race Goals</h3>
+              <h3 className="text-lg font-semibold text-white border-b border-slate-700 pb-3">Race Goals & Targets</h3>
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-3">
+                <div className="space-y-3 md:col-span-2">
                     <label className="text-xs text-slate-500 uppercase font-semibold">Goal Time</label>
                     <div className="flex gap-2">
                         <div className="relative w-full">
@@ -352,7 +489,7 @@ const App: React.FC = () => {
                     </div>
                     <input 
                         type="range" 
-                        min="0" max="1000" step="50"
+                        min="0" max="1500" step="50"
                         value={settings.targetSodiumPerHour}
                         onChange={(e) => setSettings({...settings, targetSodiumPerHour: Number(e.target.value)})}
                         className="w-full accent-cyan-500 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer"
@@ -465,54 +602,89 @@ const App: React.FC = () => {
       </div>
   );
 
-  const renderAnalysisView = () => (
-      <div className="p-4 md:p-8 max-w-4xl mx-auto space-y-8 animate-fadeIn">
-          <div className="bg-slate-800/50 rounded-2xl p-6 border border-slate-700">
-              <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
-                  <BarChart3 className="w-6 h-6 text-blue-500" /> Fueling Analysis
-              </h2>
-              
-              <div className="h-80 w-full mb-8">
-                <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartData} margin={{top: 20, right: 30, left: 0, bottom: 0}}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
-                        <XAxis dataKey="hour" stroke="#94a3b8" tickLine={false} axisLine={false} />
-                        <YAxis stroke="#94a3b8" tickLine={false} axisLine={false} />
-                        <Tooltip 
-                            contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', color: '#f8fafc' }}
-                            cursor={{fill: '#334155', opacity: 0.4}}
-                        />
-                        <ReferenceLine y={settings.targetCarbsPerHour} stroke="#10b981" strokeDasharray="3 3" label={{ value: 'Target', fill: '#10b981', fontSize: 12, position: 'right' }} />
-                        <Bar dataKey="carbs" radius={[4, 4, 0, 0]}>
-                             {chartData.map((entry, index) => (
-                                <Cell key={`cell-${index}`} fill={
-                                    entry.carbs < entry.target * 0.8 ? '#eab308' : 
-                                    entry.carbs > entry.target * 1.1 ? '#f97316' : '#10b981'
-                                } />
-                            ))}
-                        </Bar>
-                    </BarChart>
-                </ResponsiveContainer>
-              </div>
+  const renderAnalysisView = () => {
+    if (isAnalyzing) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-slate-400">
+          <Loader2 className="w-12 h-12 animate-spin mb-4 text-blue-500" />
+          <p className="text-lg animate-pulse">Analyzing nutrition strategy...</p>
+        </div>
+      );
+    }
 
-              <div className="bg-slate-900 rounded-xl p-6 border border-slate-800 relative overflow-hidden">
-                    <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-blue-500 to-purple-600"></div>
-                    <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
-                        <Sparkles className="w-5 h-5 text-purple-400" /> AI Coach Insights
+    return (
+      <div className="p-4 md:p-8 max-w-5xl mx-auto space-y-6 animate-fadeIn">
+        <div className="flex flex-col gap-2 mb-4">
+            <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                <BarChart3 className="w-6 h-6 text-slate-400" /> Analysis
+            </h2>
+            <p className="text-slate-400">Review your fueling strategy against your targets.</p>
+        </div>
+
+        {/* Chart Section */}
+        <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 h-[400px]">
+            <h3 className="text-lg font-semibold text-white mb-6">Carbohydrates per Hour</h3>
+            <ResponsiveContainer width="100%" height="85%">
+                <BarChart data={chartData} margin={{ top: 5, right: 30, left: 0, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                    <XAxis dataKey="hour" stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} />
+                    <Tooltip 
+                        contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f8fafc' }}
+                        cursor={{ fill: '#334155', opacity: 0.4 }}
+                    />
+                    <ReferenceLine y={settings.targetCarbsPerHour} stroke="#10b981" strokeDasharray="3 3" label={{ position: 'right', value: 'Target', fill: '#10b981', fontSize: 12 }} />
+                    <Bar dataKey="carbs" radius={[4, 4, 0, 0]} maxBarSize={60}>
+                         {chartData.map((entry, index) => {
+                             const isLow = entry.carbs < settings.targetCarbsPerHour * 0.8;
+                             const isHigh = entry.carbs > settings.targetCarbsPerHour * 1.1;
+                             return <Cell key={`cell-${index}`} fill={isLow ? '#eab308' : isHigh ? '#f97316' : '#10b981'} />;
+                         })}
+                    </Bar>
+                </BarChart>
+            </ResponsiveContainer>
+        </div>
+
+        {/* AI Insight Section */}
+        {aiAnalysis && (
+            <div className="bg-gradient-to-br from-indigo-900/40 to-slate-900 rounded-xl p-6 border border-indigo-500/30 relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-4 opacity-10">
+                    <Sparkles className="w-32 h-32 text-indigo-400" />
+                </div>
+                <div className="relative z-10">
+                    <h3 className="text-lg font-bold text-indigo-300 mb-3 flex items-center gap-2">
+                        <Sparkles className="w-5 h-5" /> Coach Insight
                     </h3>
-                    {isAnalyzing ? (
-                         <div className="flex items-center gap-2 text-slate-400 py-4">
-                             <Loader2 className="w-5 h-5 animate-spin" /> Analyzing your nutrition strategy...
-                         </div>
-                    ) : (
-                        <p className="text-slate-300 leading-relaxed">
-                            {aiAnalysis || "Click 'Analyze Plan' to get personalized feedback on your strategy."}
-                        </p>
-                    )}
-              </div>
-          </div>
+                    <div className="prose prose-invert prose-sm max-w-none text-slate-300 whitespace-pre-line">
+                        {aiAnalysis}
+                    </div>
+                </div>
+            </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                <p className="text-slate-500 text-xs uppercase font-bold mb-1">Total Carbs</p>
+                <p className="text-2xl font-mono text-white">
+                    {plan.reduce((acc, h) => acc + h.items.reduce((s, i) => s + i.carbs, 0), 0)}g
+                </p>
+            </div>
+             <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                <p className="text-slate-500 text-xs uppercase font-bold mb-1">Total Sodium</p>
+                <p className="text-2xl font-mono text-cyan-400">
+                    {plan.reduce((acc, h) => acc + h.items.reduce((s, i) => s + (i.sodium || 0), 0), 0)}mg
+                </p>
+            </div>
+             <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                <p className="text-slate-500 text-xs uppercase font-bold mb-1">Total Caffeine</p>
+                <p className="text-2xl font-mono text-yellow-500">
+                    {plan.reduce((acc, h) => acc + h.items.reduce((s, i) => s + (i.caffeine || 0), 0), 0)}mg
+                </p>
+            </div>
+        </div>
       </div>
-  );
+    );
+  };
 
   // --- Main Render ---
 

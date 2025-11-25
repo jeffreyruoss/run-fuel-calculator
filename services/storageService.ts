@@ -10,6 +10,15 @@ const KEYS = {
 export const DEFAULT_SETTINGS: UserSettings = {
   targetTimeHours: 3,
   targetTimeMinutes: 30,
+  
+  // New Defaults
+  sweatProfile: 'AVERAGE',
+  activityMode: 'RACE',
+  weather: {
+    temperatureF: 70,
+    humidity: 50
+  },
+
   targetCarbsPerHour: DEFAULT_TARGET_CARBS,
   targetSodiumPerHour: DEFAULT_TARGET_SODIUM,
   targetPotassiumPerHour: DEFAULT_TARGET_POTASSIUM,
@@ -49,9 +58,20 @@ export const loadSettings = (): UserSettings => {
     const data = localStorage.getItem(KEYS.SETTINGS);
     if (!data) return DEFAULT_SETTINGS;
     
-    // Merge with default to ensure new fields (like customFuels) exist if loading old data
+    // Merge with default to ensure new fields (like customFuels, weather) exist if loading old data
     const parsed = JSON.parse(data);
-    return { ...DEFAULT_SETTINGS, ...parsed };
+    
+    // Deep merge weather object if it exists in parsed but might be missing properties or if completely missing
+    const mergedWeather = {
+        ...DEFAULT_SETTINGS.weather,
+        ...(parsed.weather || {})
+    };
+
+    return { 
+        ...DEFAULT_SETTINGS, 
+        ...parsed,
+        weather: mergedWeather
+    };
   } catch (e) {
     return DEFAULT_SETTINGS;
   }
